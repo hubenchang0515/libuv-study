@@ -10,7 +10,8 @@ void onNewConnection(uv_stream_t *server, int status);
 void allocer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf);
 void readSocket(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf);
 void response(uv_stream_t *stream, const void* request, size_t length);
-void readFile(uv_fs_t* req);
+void readFileAfterOpen(uv_fs_t* req);
+void readFileAfterWrite(uv_write_t* req, int state);
 void writeSocket(uv_fs_t* req);
 void closeSocket(uv_write_t* req, int status);
 
@@ -110,16 +111,16 @@ void response(uv_stream_t *stream, const void* request, size_t length)
     {
         strcat(url,"index.html");
     }
-    printf("%s\n", request);
+    //printf("%s\n", request);
 
     uv_fs_t* open_req = malloc(sizeof(uv_fs_t));
     open_req->data = stream;
-    uv_fs_open(uv_default_loop(), open_req, url, O_RDONLY, 0, readFile);
+    uv_fs_open(uv_default_loop(), open_req, url, O_RDONLY, 0, readFileAfterOpen);
 }
 
 
 /* 打开文件完成时调用,进行文件读取 */
-void readFile(uv_fs_t* req)
+void readFileAfterOpen(uv_fs_t* req)
 {
     if(req->result < 0)
     {
@@ -133,16 +134,35 @@ void readFile(uv_fs_t* req)
     uv_buf_t* buf = malloc(sizeof(uv_buf_t));
     buf->base = malloc(1024);
     buf->len = 1024;
-    ptr_t* dataArray = malloc(2 * sizeof(ptr_t));
+    ptr_t* dataArray = malloc(3 * sizeof(ptr_t));
     dataArray[0] = req->data; // socket
     dataArray[1] = buf; // buffer
+    dataArray[2] = (void*)req->result; // fd
     read_req->data = (void*)dataArray;
     uv_fs_read(uv_default_loop(), read_req, req->result, buf, 1, -1, writeSocket);
-    printf("open file\n");
 
     free(req);
 }
 
+
+/* 写完socket时调用，继续读取文件 */
+void readFileAfterWrite(uv_write_t* req, int state)
+{
+    // if(req->result < 0)
+    // {
+    //     fprintf(stderr, "Write socket error : %s\n", uv_strerror(req->result));
+    //     uv_close(req->data, NULL);
+    //     free(req);
+    //     return;
+    // }
+
+    ptr_t* dataArray = (ptr_t*)(req->data);
+    uv_fs_t* read_req = malloc(sizeof(uv_fs_t));
+    read_req->data = dataArray;
+    uv_fs_read(uv_default_loop(), read_req, (int)dataArray[2], dataArray[1], 1, -1, writeSocket);
+
+    free(req);
+}
 
 /* 文件读取完成时调用,写入socket */
 void writeSocket(uv_fs_t* req)
@@ -155,15 +175,19 @@ void writeSocket(uv_fs_t* req)
         uv_close(dataArray[0], NULL);
         free(req);
     }
+    else if(req->result == 0)
+    {
+        uv_close(dataArray[0], NULL);
+    }
     else
     {
         /* 将文件中读取到的内容发送回socket */
-        printf(" %d \n", req->result);
+        //printf(" %d \n", req->result);
         uv_write_t* write_req = malloc(sizeof(uv_write_t)); // 
         write_req->data = dataArray;
         ((uv_buf_t*)dataArray[1])->len = req->result;
-        uv_write(write_req, dataArray[0], dataArray[1], 1, closeSocket);
-        printf("html : %.*s\n", req->result, ((uv_buf_t*)dataArray[1])->base);
+        uv_write(write_req, dataArray[0], dataArray[1], 1, readFileAfterWrite);
+        //printf("html : %.*s\n", req->result, ((uv_buf_t*)dataArray[1])->base);
     }
 }
 
@@ -171,7 +195,7 @@ void writeSocket(uv_fs_t* req)
 void closeSocket(uv_write_t* req, int status)
 {
     ptr_t* dataArray = (ptr_t*)(req->data);
-    uv_close(dataArray[0], NULL); // 关闭socket
+    //uv_close(dataArray[0], NULL); // 关闭socket
 
     free(dataArray[1]);  //  
     free(req); // 
